@@ -28,6 +28,54 @@
 // picojsonはコピペ用データ構造を作るために使う
 #include "picojson/picojson.h"
 
+#include <iostream>
+#include <fstream>
+#include <cstdint>
+
+// LUC:
+#include <boost/asio.hpp>
+
+using namespace boost::asio;
+using ip::tcp;
+using std::string;
+using std::cout;
+using std::endl;
+
+string read_(tcp::socket & socket) {
+    boost::asio::streambuf buf;
+    boost::asio::read_until( socket, buf, "\n" );
+    string data = boost::asio::buffer_cast<const char*>(buf.data());
+    return data;
+}
+
+void send_(tcp::socket & socket, const string& message) {
+    const string msg = message + "\n";
+    boost::asio::write( socket, boost::asio::buffer(message) );
+}
+
+int openTCPSocketServer(const std::string& parameter) {
+    boost::asio::io_service io_service;
+    
+    //listen for new connection
+    tcp::acceptor acceptor_(io_service, tcp::endpoint(tcp::v4(), 1234 ));
+    
+    //socket creation
+    tcp::socket socket_(io_service);
+    
+    //waiting for the connection
+    acceptor_.accept(socket_);
+    
+    //read operation
+    string message = read_(socket_);
+    cout << message << endl;
+    
+    //write operation
+    send_(socket_, parameter);
+    cout << "Server sent : '" << parameter << "' to Client!" << endl;
+    
+    return 0;
+}
+
 class Connection {
  public:
   rtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection;
@@ -288,6 +336,121 @@ void cmd_send(const std::string& parameter) {
   connection.data_channel->Send(buffer);
 }
 
+// Program to dump the section codes and lengths in an mp4 file.
+
+bool read32(std::ifstream& f, uint32_t& n) {
+    f.read((char*)&n, sizeof n);
+    // Comment this out if your machine is big-endian.
+    n = n >> 24 | n << 24 | (n >> 8 & 0xff00) | (n << 8 & 0xff0000);
+    return bool(f);
+}
+
+void print_chars(uint32_t n) {    // assumes little-endian
+    std::cout << (char)(n >> 24)
+    << (char)(n >> 16 & 0xff)
+    << (char)(n >>  8 & 0xff)
+    << (char)(n       & 0xff);
+}
+
+bool mp4info(const std::string& parameter) {
+    std::cout << " file: " << parameter << '\n';
+    std::ifstream f("sample.mp4", f.in|f.binary);
+    if (!f) { std::cerr << "Cannot open file.\n"; return false; }
+    for (uint32_t size; read32(f, size); ) {
+        uint32_t type;
+        read32(f, type);
+        print_chars(type);
+        //std::string bytes(type, size);
+        //cmd_send(...);
+        std::cout << "  " << size << '\n';
+        f.ignore(size - 8);
+    }
+    
+    
+}
+
+
+std::string& ltrim(std::string& str, const std::string& chars = "\t\n\v\f\r ")
+{
+    str.erase(0, str.find_first_not_of(chars));
+    return str;
+}
+
+std::string& rtrim(std::string& str, const std::string& chars = "\t\n\v\f\r ")
+{
+    str.erase(str.find_last_not_of(chars) + 1);
+    return str;
+}
+
+std::string& trim(std::string& str, const std::string& chars = "\t\n\v\f\r ")
+{
+    return ltrim(rtrim(str, chars), chars);
+}
+
+
+// read file and stream
+void stream_file(std::string file_name){
+    std::ifstream f(file_name.c_str(), f.in|f.binary);
+    if (!f) { std::cerr << "Cannot open file.\n"; return; }
+    /*for (uint32_t size; read32(f, size); ) {
+        uint32_t type;
+        read32(f, type);
+        print_chars(type);
+        std::cout << "  " << size << '\n';
+        f.ignore(size - 8);
+    }*/
+    size_t n = sizeof (uint32_t);
+    
+    size_t chunk = 1024 * 10;
+    uint32_t* data = new uint32_t [chunk];
+    
+    f.seekg (0, f.end);
+    int length = f.tellg();
+    f.seekg (0, f.beg);
+    
+    while(1){
+        f.read((char*)data, n);
+        std::cout << "\n size : " << length << "\n data : " << data ;
+        std::string dt((char*)data, n);
+        cmd_send(dt);
+        
+        n = chunk;
+        
+        length-= chunk;
+        
+        if(length <= 0){
+            break;
+        }
+    }
+    
+    
+    delete [] data;
+    
+    
+    f.close();
+    
+}
+
+bool cmd_stream(const std::string& parameter) {
+    std::string p = parameter;
+    std::string chars = "\t\n\v\f\r; ";
+    trim(p, chars);
+    std::cout << " file: " << p << " : " << p.size() << '\n';
+    
+    stream_file(p);
+    
+}
+
+bool cmd_tcp(const std::string& parameter) {
+    //std::string p = parameter;
+    //std::string chars = "\t\n\v\f\r; ";
+    //trim(p, chars);
+    
+    openTCPSocketServer(parameter);
+    
+}
+
+
 void cmd_quit() {
   // スレッドを活かしながらCloseしないと、別スレッドからのイベント待ちになり終了できなくなる
   connection.peer_connection->Close();
@@ -299,6 +462,7 @@ void cmd_quit() {
   worker_thread->Stop();
   signaling_thread->Stop();
 }
+
 
 int main(int argc, char* argv[]) {
   // 第三引数にtrueを指定すると、WebRTC関連の引数をargvから削除してくれるらしい
@@ -371,6 +535,14 @@ int main(int argc, char* argv[]) {
         command = "send";
         is_cmd_mode = false;
 
+      } else if (line == "stream") {
+          command = "stream";
+          is_cmd_mode = false;
+          
+      } else if (line == "tcp") {
+          command = "tcp";
+          is_cmd_mode = false;
+          
       } else if (line == "quit") {
         cmd_quit();
         break;
@@ -392,6 +564,13 @@ int main(int argc, char* argv[]) {
 
         } else if (command == "send") {
           cmd_send(parameter);
+        
+        } else if (command == "stream"){
+          cmd_stream(parameter);
+        
+        } else if (command == "tcp"){
+          cmd_tcp(parameter);
+            
         }
         
         parameter = "";
